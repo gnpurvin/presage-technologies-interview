@@ -1,0 +1,4 @@
+HeartRateFromVideo
+*.o
+build/
+.vscode/
