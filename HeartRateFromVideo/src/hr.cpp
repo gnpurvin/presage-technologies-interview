@@ -172,15 +172,17 @@ double resampleAndEstimateBpm(const std::vector<double>& sigTimes, const std::ve
             uniformSignal[i] = sigGreen.back();
         } else {
             // Linear interpolation between two adjacent samples
-            int idx = static_cast<int>(lowerBound - sigTimes.begin());
-            int i0 = (idx - 1);
-            int i1 = idx;
-            double t0 = sigTimes[i0];
-            double t1 = sigTimes[i1];
-            double v0 = sigGreen[i0];
-            double v1 = sigGreen[i1];
-            double alpha = ((uniformTime - t0) / (t1 - t0 + EPSILON_SMALL));
-            uniformSignal[i] = (v0 * (1.0 - alpha)) + (v1 * alpha);
+            int idx = static_cast<int>(lowerBound - sigTimes.begin());  // Index of first time >= uniformTime
+            int i0 = (idx - 1);                                         // Index of earlier sample
+            int i1 = idx;                                               // Index of later sample
+            double time0 = sigTimes[i0];                                // Timestamp of earlier sample
+            double time1 = sigTimes[i1];                                // Timestamp of later sample
+            double greenValue0 = sigGreen[i0];                          // Green value at earlier sample
+            double greenValue1 = sigGreen[i1];                          // Green value at later sample
+            double interpolationFactor =
+                ((uniformTime - time0) / (time1 - time0 + EPSILON_SMALL));  // How far between samples (0.0 to 1.0)
+            uniformSignal[i] =
+                (greenValue0 * (1.0 - interpolationFactor)) + (greenValue1 * interpolationFactor);  // Weighted average
         }
     }
 
@@ -196,36 +198,40 @@ double resampleAndEstimateBpm(const std::vector<double>& sigTimes, const std::ve
 
     // Compute FFT to convert signal to frequency domain
     GstFFTF64* fft = gst_fft_f64_new(fourierSize, FALSE);
-    if (fft == nullptr) {
+    if (!fft) {
         return 0.0;
     }
 
     std::vector<GstFFTF64Complex> freqBins((fourierSize / 2) + 1);
     gst_fft_f64_fft(fft, uniformSignal.data(), freqBins.data());
 
-    // Calculate frequency bin indices for physiological range (0.5-4 Hz = 30-240 BPM)
-    double Fs = (static_cast<double>(fourierSize) / duration);  // sampling frequency in Hz
-    int kmin = std::max(1, static_cast<int>(std::floor((SEARCH_MIN_HZ * static_cast<double>(fourierSize)) / Fs)));
-    int kmax = std::min((fourierSize / 2) - 1,
-                        static_cast<int>(std::ceil((SEARCH_MAX_HZ * static_cast<double>(fourierSize)) / Fs)));
+    // Calculate frequency bin indices for physiological range
+    double samplingFrequency = (static_cast<double>(fourierSize) / duration);  // sampling frequency in Hz
+    int minFreqBin = std::max(
+        1, static_cast<int>(std::floor((SEARCH_MIN_HZ * static_cast<double>(fourierSize)) / samplingFrequency)));
+    int maxFreqBin =
+        std::min((fourierSize / 2) - 1,
+                 static_cast<int>(std::ceil((SEARCH_MAX_HZ * static_cast<double>(fourierSize)) / samplingFrequency)));
 
     // Find frequency bin with maximum power (dominant heart rate)
-    double bestPower = 0.0;
-    int bestK = kmin;
-    for (int k = kmin; k <= kmax; ++k) {
-        double re = freqBins[k].r;
-        double im = freqBins[k].i;
-        double power = (re * re) + (im * im);  // magnitude squared
-        if (power > bestPower) {
-            bestPower = power;
-            bestK = k;
+    double maxPSD = 0.0;
+    int peakFreqBin = minFreqBin;
+    for (int binIndex = minFreqBin; binIndex <= maxFreqBin; ++binIndex) {
+        double realPart = freqBins[binIndex].r;
+        double imagPart = freqBins[binIndex].i;
+        double binPower = (realPart * realPart) + (imagPart * imagPart);  // magnitude squared
+        double psd = binPower / (samplingFrequency / fourierSize);        // Power per Hz
+
+        if (psd > maxPSD) {
+            maxPSD = psd;
+            peakFreqBin = binIndex;
         }
     }
 
     gst_fft_f64_free(fft);
 
     // Convert peak frequency to BPM estimate
-    double peakFreqHz = (static_cast<double>(bestK) * Fs) / static_cast<double>(fourierSize);
-    double estimatedBpm = (peakFreqHz * 60.0);
+    double peakFreqHz = (static_cast<double>(peakFreqBin) * samplingFrequency) / static_cast<double>(fourierSize);
+    double estimatedBpm = (peakFreqHz * SECONDS_PER_MINUTE);
     return estimatedBpm;
 }

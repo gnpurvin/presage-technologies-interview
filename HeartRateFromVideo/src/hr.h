@@ -9,11 +9,13 @@
 
 constexpr int BYTES_PER_PIXEL = 3;             // RGB packed
 constexpr double DEFAULT_FALLBACK_FPS = 30.0;  // used for duration calculation fallback
-constexpr double MIN_SAMPLING_RATE = 15.0;     // Hz for resampling
-constexpr double MAX_SAMPLING_RATE = 60.0;     // Hz for resampling
-constexpr double SEARCH_MIN_HZ = 0.66;         // 40 BPM
-constexpr double SEARCH_MAX_HZ = 3.00;         // 180 BPM
-constexpr double EPSILON_SMALL = 1e-12;        // small value to avoid div by zero
+// Sampling rate limits: 15 Hz satisfies Nyquist for 4 Hz heart rate + safety margin; 60 Hz prevents excessive FFT sizes
+constexpr double MIN_SAMPLING_RATE = 15.0;   // Hz for resampling
+constexpr double MAX_SAMPLING_RATE = 60.0;   // Hz for resampling
+constexpr double SEARCH_MIN_HZ = 0.66;       // 40 BPM
+constexpr double SEARCH_MAX_HZ = 3.00;       // 180 BPM
+constexpr double EPSILON_SMALL = 1e-12;      // small value to avoid div by zero
+constexpr double SECONDS_PER_MINUTE = 60.0;  // conversion factor from Hz to BPM
 
 // Forehead ROI calculation and storage
 class Forehead {

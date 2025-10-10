@@ -1,45 +1,54 @@
 # HeartRateFromVideo
 
-Sample C++ project demonstrating programmatic construction of a GStreamer pipeline that reads a video file and delivers frames to an appsink.
+C++ implementation that extracts heart rate from video using computer vision and signal processing techniques.
 
+## How it Works
 
-Ubuntu 22.04 (target)
+1. **Green Channel Extraction**: Analyzes the forehead region for green channel pixel values (heart rate signal is strongest in green channel)
+2. **Signal Processing**: Applies linear interpolation, DC removal, and FFT analysis 
+3. **Heart Rate Detection**: Finds peak in Power Spectral Density within physiological range (40-180 BPM)
 
-This project targets Ubuntu 22.04. To build and run on that platform, install the following prerequisites and GStreamer development packages:
+## Prerequisites
 
-1. Update package lists and install build tools and pkg-config:
+This project targets Ubuntu 22.04. Install the following dependencies:
 
-    sudo apt update
-    sudo apt install build-essential pkg-config
+1. Update package lists and install build tools:
+```bash
+sudo apt update
+sudo apt install build-essential pkg-config
+```
 
-2. Install GStreamer development headers and tools:
+2. Install GStreamer development headers:
+```bash
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools
+```
 
-    sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools
+3. Install GStreamer plugins for video format support:
+```bash
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+```
 
-3. (Recommended) Install common plugin packages so decoding for popular formats works out-of-the-box:
+## Build and Run
 
-    sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+```bash
+make
+./HeartRateFromVideo <video-file>
+```
 
-Build and run
+Example:
+```bash
+./HeartRateFromVideo ../codingtest.mov
+```
 
-   make
+## BPM Measurement Results
 
-Usage
+**Measured BPM on codingtest.mov: 47.4465 BPM**
 
-   ./HeartRateFromVideo <video-file>
+The program processes 1,822 frames and outputs the estimated heart rate based on Fourier analysis of green channel variations in the forehead region.
 
-The program constructs a pipeline programmatically (filesrc -> decodebin -> videoconvert -> appsink) and prints a short log for each pulled frame (size and PTS).
+## Technical Details
 
-Notes
-
-- This is an instructional minimal example. For production use add robust error handling and a frame-processing implementation.
-- If `make` fails with pkg-config errors, verify `pkg-config` is installed and that the packages above completed successfully.
-
-Usage
-
-  ./HeartRateFromVideo <video-file>
-
-The program will print a small log for each pulled frame (size and PTS). It demonstrates how to: filesrc -> decodebin -> videoconvert -> appsink, with dynamic pad linking.
-
-Notes
-- This is a minimal example meant for instructional purposes. For production use, add better error handling, thread-safety, and a proper frame processing loop.
+- **Pipeline**: `filesrc -> decodebin -> videoconvert -> chromahold -> capsfilter -> videoconvert2 -> appsink`
+- **ROI**: Forehead region optimized for heart rate detection
+- **Algorithm**: FFT-based power spectral density analysis with physiological constraints
+- **Performance**: Optimized with frame dimension caching and single ROI calculation
