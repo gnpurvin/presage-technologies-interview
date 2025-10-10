@@ -16,29 +16,34 @@
 #include "hr.h"
 #include "pipeline.h"
 
-
-
 int main(int argc, char** argv) {
     gst_init(&argc, &argv);
 
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <video-file>\n";
-        return 1;
+        return -1;
     }
 
-    const char* filePath = argv[1];
+    std::string filePath = argv[1];
 
     GstElement* pipeline = nullptr;
     GstElement* appsink = nullptr;
     GstBus* bus = nullptr;
 
     pipeline = buildPipeline(filePath, &appsink);
-    if (pipeline == nullptr) {
-        return 2;
+    if (!pipeline) {
+        // errors printed in buildPipeline
+        return -1;
     }
 
     /* Obtain the bus from the pipeline here so the caller owns the reference */
     bus = gst_element_get_bus(pipeline);
+    if (!bus) {
+        std::cout << "Failed to get GstBus from pipeline.\n";
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        return -1;
+    }
 
     size_t frameCount = 0;
 
@@ -47,14 +52,12 @@ int main(int argc, char** argv) {
     std::vector<double> sigGreen; /* average green per frame */
 
     while (true) {
-        GstSample* sample =
-            gst_app_sink_try_pull_sample(sink, 500 * GST_MSECOND);
-        if (sample != nullptr) {
-            bool ok = processSampleForGreen(
-                sample, frameCount, DEFAULT_FALLBACK_FPS, sigTimes, sigGreen);
+        /* try to pull sample from appsink */
+        GstSample* sample = gst_app_sink_try_pull_sample(sink, 500 * GST_MSECOND);
+        if (sample) {
+            bool ok = processSampleForGreen(sample, frameCount, DEFAULT_FALLBACK_FPS, sigTimes, sigGreen);
             if (!ok) {
-                std::cout << "Frame " << frameCount
-                          << ": sample processing failed or missing buffer\n";
+                std::cout << "Frame " << frameCount << ": sample processing failed or missing buffer\n";
             }
 
             ++frameCount;
@@ -68,24 +71,18 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "Pulled " << frameCount << " frames. Shutting down..."
-              << std::endl;
+    std::cout << "Pulled " << frameCount << " frames. Shutting down..." << std::endl;
 
     gst_element_set_state(pipeline, GST_STATE_NULL);
     gst_object_unref(bus);
     gst_object_unref(pipeline);
 
     /* If we collected a signal, perform spectral analysis to estimate BPM */
-    if (sigGreen.size() >= MIN_FRAMES_FOR_EST) {
-        double bpm = resampleAndEstimateBpm(sigTimes, sigGreen);
-        if (bpm > 0.0) {
-            std::cout << "Estimated heart rate: " << bpm << " BPM" << std::endl;
-        } else {
-            std::cout << "BPM estimation failed." << std::endl;
-        }
+    double bpm = resampleAndEstimateBpm(sigTimes, sigGreen);
+    if (bpm > 0.0) {
+        std::cout << "Estimated heart rate: " << bpm << " BPM" << std::endl;
     } else {
-        std::cout << "Not enough frames collected for BPM estimation ("
-                  << sigGreen.size() << ")." << std::endl;
+        std::cout << "BPM estimation failed." << std::endl;
     }
 
     return 0;

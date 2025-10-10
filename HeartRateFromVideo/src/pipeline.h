@@ -3,14 +3,16 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
-// Callback for decodebin pad-added; links the dynamic pad to the provided
-// sink element.
-void onPadAdded(GstElement* src, GstPad* pad, gpointer data);
+#include <string>
 
 // Build the pipeline and return a newly created GstElement* pipeline. The
 // caller takes ownership and is responsible for setting state and unreffing.
 // Returns nullptr on failure.
-GstElement* buildPipeline(const char* filePath, GstElement** outAppsink);
+GstElement* buildPipeline(const std::string& filePath, GstElement** outAppsink);
+
+// Callback for decodebin pad-added; links the dynamic pad to the provided
+// sink element.
+void onPadAdded(GstElement* src, GstPad* pad, gpointer data);
 
 // Poll the GstBus for ERROR or EOS messages. If an ERROR is received the
 // function will print diagnostics and return true indicating the main loop
