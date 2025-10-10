@@ -46,6 +46,7 @@ int main(int argc, char** argv) {
     }
 
     size_t frameCount = 0;
+    std::shared_ptr<Forehead> forehead;  // Will be initialized on first frame
 
     GstAppSink* sink = GST_APP_SINK(appsink);
     std::vector<double> sigTimes; /* seconds */
@@ -55,7 +56,7 @@ int main(int argc, char** argv) {
         /* try to pull sample from appsink */
         GstSample* sample = gst_app_sink_try_pull_sample(sink, 500 * GST_MSECOND);
         if (sample) {
-            bool ok = processSampleForGreen(sample, frameCount, DEFAULT_FALLBACK_FPS, sigTimes, sigGreen);
+            bool ok = processSampleForGreen(sample, frameCount, forehead, sigTimes, sigGreen);
             if (!ok) {
                 std::cout << "Frame " << frameCount << ": sample processing failed or missing buffer\n";
             }

@@ -7,13 +7,62 @@
 
 #include <algorithm>
 #include <iostream>
+#include <stdexcept>
+
+// Forehead constructor - calculates ROI from sample caps
+Forehead::Forehead(GstSample* sample) {
+    if (!sample) {
+        throw std::runtime_error("Forehead constructor: null sample");
+    }
+
+    // Extract frame dimensions from sample caps
+    GstCaps* sampleCaps = gst_sample_get_caps(sample);
+    if (!sampleCaps) {
+        throw std::runtime_error("Forehead constructor: sample has no caps");
+    }
+
+    GstStructure* capsStruct = gst_caps_get_structure(sampleCaps, 0);
+    if (!capsStruct) {
+        throw std::runtime_error("Forehead constructor: caps structure is null");
+    }
+
+    gint frameWidth = 0;
+    gint frameHeight = 0;
+    gst_structure_get_int(capsStruct, "width", &frameWidth);
+    gst_structure_get_int(capsStruct, "height", &frameHeight);
+
+    // Validate frame dimensions
+    if (frameWidth <= 0 || frameHeight <= 0) {
+        throw std::runtime_error("Forehead constructor: invalid frame dimensions");
+    }
+
+    // Store frame dimensions for later use
+    this->frameWidth = frameWidth;
+    this->frameHeight = frameHeight;
+
+    // Compute forehead ROI in pixel coordinates using class constants
+    int tempXStart = static_cast<int>((frameWidth * X_START_FRAC));
+    int tempXEnd = static_cast<int>((frameWidth * X_END_FRAC));
+    int tempYStart = static_cast<int>((frameHeight * Y_START_FRAC));
+    int tempYEnd = static_cast<int>((frameHeight * Y_END_FRAC));
+
+    // Clamp bounds to avoid out-of-bounds access
+    xStart = std::max(0, tempXStart);
+    yStart = std::max(0, tempYStart);
+    xEnd = std::min(frameWidth, tempXEnd);
+    yEnd = std::min(frameHeight, tempYEnd);
+
+    // Validate ROI is not empty
+    if (xStart >= xEnd || yStart >= yEnd) {
+        throw std::runtime_error("Forehead ROI is empty or invalid");
+    }
+}
 
 // processSampleForGreen
 // Maps the GstBuffer contained in 'sample', computes the average green
-// pixel value within a forehead ROI (or whole frame if dimensions are
-// output vectors. Returns true on success.
-bool processSampleForGreen(GstSample* sample, size_t frameIndex, double fallbackRate, std::vector<double>& outTimes,
-                           std::vector<double>& outGreen) {
+// pixel value within a forehead ROI. Returns true on success.
+bool processSampleForGreen(GstSample* sample, size_t frameIndex, std::shared_ptr<Forehead>& forehead,
+                           std::vector<double>& outTimes, std::vector<double>& outGreen) {
     if (!sample) {
         std::cout << "processSampleForGreen: null sample\n";
         return false;
@@ -25,111 +74,51 @@ bool processSampleForGreen(GstSample* sample, size_t frameIndex, double fallback
         return false;
     }
 
+    // Obtain frame width/height from sample caps if forehead not yet calculated
+    if (!forehead) {
+        // Create forehead ROI object (only done once)
+        try {
+            forehead = std::make_shared<Forehead>(sample);
+        } catch (const std::runtime_error& e) {
+            std::cout << "processSampleForGreen: " << e.what() << "\n";
+            return false;
+        }
+    }
+
+    // Get timestamp in seconds; return false if unavailable
     GstClockTime pts = GST_BUFFER_PTS(buffer);
-    double timestampSeconds = 0.0;
     if (pts == GST_CLOCK_TIME_NONE) {
-        timestampSeconds = -1.0;
-    } else {
-        timestampSeconds = static_cast<double>(pts) / GST_SECOND;
-    }
-
-    // Obtain frame width/height from sample caps if available.
-    GstCaps* sampleCaps = gst_sample_get_caps(sample);
-    if (!sampleCaps) {
-        std::cout << "processSampleForGreen: sample has no caps\n";
-        return false;
-    }
-    GstStructure* capsStruct = gst_caps_get_structure(sampleCaps, 0);
-    if (!capsStruct) {
-        std::cout << "processSampleForGreen: caps structure is null\n";
-        return false;
-    }
-    gint frameWidth = 0;
-    gint frameHeight = 0;
-    gst_structure_get_int(capsStruct, "width", &frameWidth);
-    gst_structure_get_int(capsStruct, "height", &frameHeight);
-
-    // Early return if we can't get frame dimensions
-    if (frameWidth <= 0 || frameHeight <= 0) {
-        std::cout << "processSampleForGreen: failed to get frame width/height from caps\n";
+        std::cout << "processSampleForGreen: buffer has no PTS timestamp\n";
         return false;
     }
 
-    // Compute forehead ROI in pixel coordinates using named constants
-    int foreheadXStart = 0;
-    int foreheadXEnd = 0;
-    int foreheadYStart = 0;
-    int foreheadYEnd = 0;
-    foreheadXStart = static_cast<int>(frameWidth * FOREHEAD_X_START_FRAC);
-    foreheadXEnd = static_cast<int>(frameWidth * FOREHEAD_X_END_FRAC);
-    foreheadYStart = static_cast<int>(frameHeight * FOREHEAD_Y_START_FRAC);
-    foreheadYEnd = static_cast<int>(frameHeight * FOREHEAD_Y_END_FRAC);
-
-    // sanity check to avoid out-of-bounds access
-    if (foreheadXStart < 0) {
-        foreheadXStart = 0;
-    }
-    if (foreheadYStart < 0) {
-        foreheadYStart = 0;
-    }
-    if (foreheadXEnd > frameWidth) {
-        foreheadXEnd = frameWidth;
-    }
-    if (foreheadYEnd > frameHeight) {
-        foreheadYEnd = frameHeight;
-    }
-
-    uint64_t intensitySum = 0;
-    size_t pixelCount = 0;
-
-    // Process RGB packed data within forehead
+    // Process RGB packed data within forehead ROI
     GstMapInfo mapInfo;
     if (!gst_buffer_map(buffer, &mapInfo, GST_MAP_READ)) {
         std::cout << "processSampleForGreen: failed to map buffer\n";
         return false;
     }
-    size_t expectedSize = static_cast<size_t>(frameWidth) * static_cast<size_t>(frameHeight) * BYTES_PER_PIXEL;
-    if (mapInfo.size < expectedSize) {
-        std::cout << "processSampleForGreen: buffer size mismatch\n";
-        gst_buffer_unmap(buffer, &mapInfo);
-        return false;
-    }
 
     const guint8* pixelData = mapInfo.data;
-    // bytes per row
-    size_t rowStride = static_cast<size_t>(frameWidth) * BYTES_PER_PIXEL;
-    for (size_t rowNum = foreheadYStart; rowNum < foreheadYEnd; ++rowNum) {
-        // start of this row
+    uint64_t greenSum = 0;
+    size_t pixelCount = 0;
+
+    // Use cached frame width for stride calculation
+    size_t rowStride = (static_cast<size_t>(forehead->frameWidth) * BYTES_PER_PIXEL);
+    for (size_t rowNum = forehead->yStart; rowNum < forehead->yEnd; ++rowNum) {
         const guint8* rowData = pixelData + (rowNum * rowStride);
-        for (int colNum = foreheadXStart; colNum < foreheadXEnd; ++colNum) {
-            // start of this pixel
-            int pixelOffset = colNum * BYTES_PER_PIXEL;
-            // Compute luminance (intensity) instead of just green channel
-            // This works with chromahold output where green areas are preserved
-            // and non-green areas are desaturated
-            uint8_t r = rowData[pixelOffset + 0];
+        for (int colNum = forehead->xStart; colNum < forehead->xEnd; ++colNum) {
+            int pixelOffset = (colNum * BYTES_PER_PIXEL);
             uint8_t g = rowData[pixelOffset + 1];
-            uint8_t b = rowData[pixelOffset + 2];
-            uint64_t intensity = static_cast<uint64_t>(0.299 * r + 0.587 * g + 0.114 * b);
-            intensitySum += intensity;
+            greenSum += g;
             ++pixelCount;
         }
     }
 
-    double averageGreen = 0.0;
-    if (pixelCount > 0) {
-        averageGreen = static_cast<double>(intensitySum) / static_cast<double>(pixelCount);
-    }
-
+    double averageGreen = (static_cast<double>(greenSum) / static_cast<double>(pixelCount));
     std::cout << "Frame " << frameIndex << ": avg_green=" << averageGreen << "\n";
 
-    // Timestamp fallback uses the provided fallbackRate (e.g., 30 FPS)
-    if (timestampSeconds >= 0.0) {
-        outTimes.push_back(timestampSeconds);
-    } else {
-        outTimes.push_back(static_cast<double>(frameIndex) / fallbackRate);
-    }
-
+    outTimes.push_back((static_cast<double>(pts) / GST_SECOND));
     outGreen.push_back(averageGreen);
 
     gst_buffer_unmap(buffer, &mapInfo);
@@ -142,55 +131,60 @@ bool processSampleForGreen(GstSample* sample, size_t frameIndex, double fallback
 // and searches for the peak within a physiological frequency range.
 double resampleAndEstimateBpm(const std::vector<double>& sigTimes, const std::vector<double>& sigGreen) {
     if ((sigTimes.size() < 2) || (sigTimes.size() != sigGreen.size())) {
+        std::cout << "resampleAndEstimateBpm: insufficient or mismatched signal data\n";
         return 0.0;
     }
 
+    // Calculate signal duration from timestamps
     double startTime = sigTimes.front();
     double endTime = sigTimes.back();
-    double duration = endTime - startTime;
+    double duration = (endTime - startTime);
     if (duration <= 0.0) {
-        duration = static_cast<double>(sigGreen.size()) / DEFAULT_FALLBACK_FPS;
+        duration = (static_cast<double>(sigGreen.size()) / DEFAULT_FALLBACK_FPS);
     }
 
-    // Estimate instantaneous frame rate and clamp to reasonable resampling
-    // rates.
-    double measuredFps = static_cast<double>(sigGreen.size()) / duration;
-    double targetFs = std::max(MIN_SAMPLING_RATE, std::min(MAX_SAMPLING_RATE, measuredFps));
+    // Calculate target sampling frequency and clamp to reasonable range (15-60 Hz)
+    double measuredFps = (static_cast<double>(sigGreen.size()) / duration);
+    double targetSampleFreq = std::max(MIN_SAMPLING_RATE, std::min(MAX_SAMPLING_RATE, measuredFps));
 
-    int N = 1;
-    while (N < static_cast<int>(targetFs * duration)) {
-        N <<= 1;  // next power of two
+    // Find the next power of 2 for FFT size (required by gst-fft)
+    int fourierSize = 1;
+    while (fourierSize < static_cast<int>((targetSampleFreq * duration))) {
+        fourierSize <<= 1;  // next power of two
     }
 
-    std::vector<double> uniformTimes(N);
-    std::vector<double> uniformSignal(N);
+    // Create uniform time grid and signal arrays
+    std::vector<double> uniformTimes(fourierSize);
+    std::vector<double> uniformSignal(fourierSize);
 
-    for (int i = 0; i < N; ++i) {
-        uniformTimes[i] = startTime + (duration * i) / static_cast<double>(N);
+    // Generate uniform time samples over the signal duration
+    for (int i = 0; i < fourierSize; ++i) {
+        uniformTimes[i] = startTime + ((duration * i) / static_cast<double>(fourierSize));
     }
 
-    // Linear interpolation onto the uniform grid.
-    for (int i = 0; i < N; ++i) {
-        double t = uniformTimes[i];
-        auto it = std::lower_bound(sigTimes.begin(), sigTimes.end(), t);
-        if (it == sigTimes.begin()) {
+    // Resample original signal onto uniform grid using linear interpolation
+    for (int i = 0; i < fourierSize; ++i) {
+        double uniformTime = uniformTimes[i];
+        auto lowerBound = std::lower_bound(sigTimes.begin(), sigTimes.end(), uniformTime);
+        if (lowerBound == sigTimes.begin()) {
             uniformSignal[i] = sigGreen.front();
-        } else if (it == sigTimes.end()) {
+        } else if (lowerBound == sigTimes.end()) {
             uniformSignal[i] = sigGreen.back();
         } else {
-            int idx = static_cast<int>(it - sigTimes.begin());
-            int i0 = idx - 1;
+            // Linear interpolation between two adjacent samples
+            int idx = static_cast<int>(lowerBound - sigTimes.begin());
+            int i0 = (idx - 1);
             int i1 = idx;
             double t0 = sigTimes[i0];
             double t1 = sigTimes[i1];
             double v0 = sigGreen[i0];
             double v1 = sigGreen[i1];
-            double alpha = (t - t0) / (t1 - t0 + EPSILON_SMALL);
-            uniformSignal[i] = v0 * (1.0 - alpha) + v1 * alpha;
+            double alpha = ((uniformTime - t0) / (t1 - t0 + EPSILON_SMALL));
+            uniformSignal[i] = (v0 * (1.0 - alpha)) + (v1 * alpha);
         }
     }
 
-    // Remove DC component (mean) from the signal.
+    // Remove DC component (subtract mean) to isolate oscillations
     double meanValue = 0.0;
     for (double v : uniformSignal) {
         meanValue += v;
@@ -200,25 +194,28 @@ double resampleAndEstimateBpm(const std::vector<double>& sigTimes, const std::ve
         v -= meanValue;
     }
 
-    // Compute FFT using gst-fft
-    GstFFTF64* fft = gst_fft_f64_new(N, FALSE);
+    // Compute FFT to convert signal to frequency domain
+    GstFFTF64* fft = gst_fft_f64_new(fourierSize, FALSE);
     if (fft == nullptr) {
         return 0.0;
     }
 
-    std::vector<GstFFTF64Complex> freqBins(N / 2 + 1);
+    std::vector<GstFFTF64Complex> freqBins((fourierSize / 2) + 1);
     gst_fft_f64_fft(fft, uniformSignal.data(), freqBins.data());
 
-    double Fs = static_cast<double>(N) / duration;  // sampling frequency in Hz
-    int kmin = std::max(1, static_cast<int>(std::floor(SEARCH_MIN_HZ * static_cast<double>(N) / Fs)));
-    int kmax = std::min(N / 2 - 1, static_cast<int>(std::ceil(SEARCH_MAX_HZ * static_cast<double>(N) / Fs)));
+    // Calculate frequency bin indices for physiological range (0.5-4 Hz = 30-240 BPM)
+    double Fs = (static_cast<double>(fourierSize) / duration);  // sampling frequency in Hz
+    int kmin = std::max(1, static_cast<int>(std::floor((SEARCH_MIN_HZ * static_cast<double>(fourierSize)) / Fs)));
+    int kmax = std::min((fourierSize / 2) - 1,
+                        static_cast<int>(std::ceil((SEARCH_MAX_HZ * static_cast<double>(fourierSize)) / Fs)));
 
+    // Find frequency bin with maximum power (dominant heart rate)
     double bestPower = 0.0;
     int bestK = kmin;
     for (int k = kmin; k <= kmax; ++k) {
         double re = freqBins[k].r;
         double im = freqBins[k].i;
-        double power = re * re + im * im;
+        double power = (re * re) + (im * im);  // magnitude squared
         if (power > bestPower) {
             bestPower = power;
             bestK = k;
@@ -227,7 +224,8 @@ double resampleAndEstimateBpm(const std::vector<double>& sigTimes, const std::ve
 
     gst_fft_f64_free(fft);
 
-    double peakFreqHz = static_cast<double>(bestK) * Fs / static_cast<double>(N);
-    double estimatedBpm = peakFreqHz * 60.0;
+    // Convert peak frequency to BPM estimate
+    double peakFreqHz = (static_cast<double>(bestK) * Fs) / static_cast<double>(fourierSize);
+    double estimatedBpm = (peakFreqHz * 60.0);
     return estimatedBpm;
 }
