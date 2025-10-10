@@ -33,24 +33,26 @@ bool processSampleForGreen(GstSample* sample, size_t frameIndex, double fallback
         timestampSeconds = static_cast<double>(pts) / GST_SECOND;
     }
 
-    GstMapInfo mapInfo;
-    if (!gst_buffer_map(buffer, &mapInfo, GST_MAP_READ)) {
-        std::cout << "processSampleForGreen: failed to map buffer\n";
+    // Obtain frame width/height from sample caps if available.
+    GstCaps* sampleCaps = gst_sample_get_caps(sample);
+    if (!sampleCaps) {
+        std::cout << "processSampleForGreen: sample has no caps\n";
         return false;
     }
-
-    const guint8* pixelData = mapInfo.data;
-
-    // Obtain frame width/height from sample caps if available.
+    GstStructure* capsStruct = gst_caps_get_structure(sampleCaps, 0);
+    if (!capsStruct) {
+        std::cout << "processSampleForGreen: caps structure is null\n";
+        return false;
+    }
     gint frameWidth = 0;
     gint frameHeight = 0;
-    GstCaps* sampleCaps = gst_sample_get_caps(sample);
-    if (sampleCaps) {
-        GstStructure* capsStruct = gst_caps_get_structure(sampleCaps, 0);
-        if (capsStruct) {
-            gst_structure_get_int(capsStruct, "width", &frameWidth);
-            gst_structure_get_int(capsStruct, "height", &frameHeight);
-        }
+    gst_structure_get_int(capsStruct, "width", &frameWidth);
+    gst_structure_get_int(capsStruct, "height", &frameHeight);
+
+    // Early return if we can't get frame dimensions
+    if (frameWidth <= 0 || frameHeight <= 0) {
+        std::cout << "processSampleForGreen: failed to get frame width/height from caps\n";
+        return false;
     }
 
     // Compute forehead ROI in pixel coordinates using named constants
@@ -58,59 +60,60 @@ bool processSampleForGreen(GstSample* sample, size_t frameIndex, double fallback
     int foreheadXEnd = 0;
     int foreheadYStart = 0;
     int foreheadYEnd = 0;
-    if (frameWidth > 0 && frameHeight > 0) {
-        foreheadXStart = static_cast<int>(frameWidth * FOREHEAD_X_START_FRAC);
-        foreheadXEnd = static_cast<int>(frameWidth * FOREHEAD_X_END_FRAC);
-        foreheadYStart = static_cast<int>(frameHeight * FOREHEAD_Y_START_FRAC);
-        foreheadYEnd = static_cast<int>(frameHeight * FOREHEAD_Y_END_FRAC);
+    foreheadXStart = static_cast<int>(frameWidth * FOREHEAD_X_START_FRAC);
+    foreheadXEnd = static_cast<int>(frameWidth * FOREHEAD_X_END_FRAC);
+    foreheadYStart = static_cast<int>(frameHeight * FOREHEAD_Y_START_FRAC);
+    foreheadYEnd = static_cast<int>(frameHeight * FOREHEAD_Y_END_FRAC);
 
-        // sanity check to avoid out-of-bounds access
-        if (foreheadXStart < 0) {
-            foreheadXStart = 0;
-        }
-        if (foreheadYStart < 0) {
-            foreheadYStart = 0;
-        }
-        if (foreheadXEnd > frameWidth) {
-            foreheadXEnd = frameWidth;
-        }
-        if (foreheadYEnd > frameHeight) {
-            foreheadYEnd = frameHeight;
-        }
+    // sanity check to avoid out-of-bounds access
+    if (foreheadXStart < 0) {
+        foreheadXStart = 0;
+    }
+    if (foreheadYStart < 0) {
+        foreheadYStart = 0;
+    }
+    if (foreheadXEnd > frameWidth) {
+        foreheadXEnd = frameWidth;
+    }
+    if (foreheadYEnd > frameHeight) {
+        foreheadYEnd = frameHeight;
     }
 
     uint64_t intensitySum = 0;
     size_t pixelCount = 0;
 
-    // If dimensions look valid and buffer size is sufficient assume RGB packed
+    // Process RGB packed data within forehead
+    GstMapInfo mapInfo;
+    if (!gst_buffer_map(buffer, &mapInfo, GST_MAP_READ)) {
+        std::cout << "processSampleForGreen: failed to map buffer\n";
+        return false;
+    }
     size_t expectedSize = static_cast<size_t>(frameWidth) * static_cast<size_t>(frameHeight) * BYTES_PER_PIXEL;
-    if ((frameWidth > 0) && (frameHeight > 0) && (mapInfo.size >= expectedSize)) {
-        size_t rowStride = static_cast<size_t>(frameWidth) * BYTES_PER_PIXEL;
-        for (int yy = foreheadYStart; yy < foreheadYEnd; ++yy) {
-            const guint8* rowPtr = pixelData + static_cast<size_t>(yy) * rowStride;
-            for (int xx = foreheadXStart; xx < foreheadXEnd; ++xx) {
-                // Compute luminance (intensity) instead of just green channel
-                // This works with chromahold output where green areas are preserved
-                // and non-green areas are desaturated
-                uint8_t r = rowPtr[xx * BYTES_PER_PIXEL + 0];
-                uint8_t g = rowPtr[xx * BYTES_PER_PIXEL + 1];
-                uint8_t b = rowPtr[xx * BYTES_PER_PIXEL + 2];
-                uint64_t intensity = static_cast<uint64_t>(0.299 * r + 0.587 * g + 0.114 * b);
-                intensitySum += intensity;
-                ++pixelCount;
-            }
-        }
-    } else {
-        // Fallback: average whole frame (if possible).
-        size_t pixels = (mapInfo.size >= static_cast<size_t>(BYTES_PER_PIXEL)) ? (mapInfo.size / BYTES_PER_PIXEL) : 0;
-        for (size_t i = 0; i < pixels; ++i) {
-            uint8_t r = pixelData[i * BYTES_PER_PIXEL + 0];
-            uint8_t g = pixelData[i * BYTES_PER_PIXEL + 1];
-            uint8_t b = pixelData[i * BYTES_PER_PIXEL + 2];
+    if (mapInfo.size < expectedSize) {
+        std::cout << "processSampleForGreen: buffer size mismatch\n";
+        gst_buffer_unmap(buffer, &mapInfo);
+        return false;
+    }
+
+    const guint8* pixelData = mapInfo.data;
+    // bytes per row
+    size_t rowStride = static_cast<size_t>(frameWidth) * BYTES_PER_PIXEL;
+    for (size_t rowNum = foreheadYStart; rowNum < foreheadYEnd; ++rowNum) {
+        // start of this row
+        const guint8* rowData = pixelData + (rowNum * rowStride);
+        for (int colNum = foreheadXStart; colNum < foreheadXEnd; ++colNum) {
+            // start of this pixel
+            int pixelOffset = colNum * BYTES_PER_PIXEL;
+            // Compute luminance (intensity) instead of just green channel
+            // This works with chromahold output where green areas are preserved
+            // and non-green areas are desaturated
+            uint8_t r = rowData[pixelOffset + 0];
+            uint8_t g = rowData[pixelOffset + 1];
+            uint8_t b = rowData[pixelOffset + 2];
             uint64_t intensity = static_cast<uint64_t>(0.299 * r + 0.587 * g + 0.114 * b);
             intensitySum += intensity;
+            ++pixelCount;
         }
-        pixelCount = pixels;
     }
 
     double averageGreen = 0.0;
